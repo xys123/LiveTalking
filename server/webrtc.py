@@ -55,8 +55,9 @@ class PlayerStreamTrack(MediaStreamTrack):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
+        # Each track keeps its own queue, but HumanPlayer owns the playout clock.
         self._queue = queue.Queue(maxsize=100)
-        self.timelist = [] #记录最近包的时间戳
+        self.timelist = [] # recent packet timestamps
         self.current_frame_count = 0
         if self.kind == 'video':
             self.framecount = 0
@@ -70,43 +71,28 @@ class PlayerStreamTrack(MediaStreamTrack):
         if self.readyState != "live":
             raise Exception
 
+        # Do not let audio and video establish separate wall-clock origins.
+        # The browser may request either track first, so both wait for the same
+        # HumanPlayer playout start before their first RTP timestamp is emitted.
+        start = await self._player.wait_for_playout_start()
         if self.kind == 'video':
-            if hasattr(self, "_timestamp"):
-                #self._timestamp = (time.time()-self._start) * VIDEO_CLOCK_RATE
-                self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
-                self.current_frame_count += 1
-                wait = self._start + self.current_frame_count * VIDEO_PTIME - time.time()
-                # wait = self.timelist[0] + len(self.timelist)*VIDEO_PTIME - time.time()               
-                if wait>0:
-                    await asyncio.sleep(wait)
-                # if len(self.timelist)>=100:
-                #     self.timelist.pop(0)
-                # self.timelist.append(time.time())
-            else:
-                self._start = time.time()
-                self._timestamp = 0
-                self.timelist.append(self._start)
-                mylogger.info('video start:%f',self._start)
-            return self._timestamp, VIDEO_TIME_BASE
-        else: #audio
-            if hasattr(self, "_timestamp"):
-                #self._timestamp = (time.time()-self._start) * SAMPLE_RATE
-                self._timestamp += int(AUDIO_PTIME * SAMPLE_RATE)
-                self.current_frame_count += 1
-                wait = self._start + self.current_frame_count * AUDIO_PTIME - time.time()
-                # wait = self.timelist[0] + len(self.timelist)*AUDIO_PTIME - time.time()
-                if wait>0:
-                    await asyncio.sleep(wait)
-                # if len(self.timelist)>=200:
-                #     self.timelist.pop(0)
-                #     self.timelist.pop(0)
-                # self.timelist.append(time.time())
-            else:
-                self._start = time.time()
-                self._timestamp = 0
-                self.timelist.append(self._start)
-                mylogger.info('audio start:%f',self._start)
-            return self._timestamp, AUDIO_TIME_BASE
+            ptime, clock_rate, time_base = VIDEO_PTIME, VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
+        else:
+            ptime, clock_rate, time_base = AUDIO_PTIME, SAMPLE_RATE, AUDIO_TIME_BASE
+
+        if hasattr(self, "_timestamp"):
+            self._timestamp += int(ptime * clock_rate)
+            self.current_frame_count += 1
+        else:
+            self._timestamp = 0
+            self.current_frame_count = 0
+            self.timelist.append(start)
+            mylogger.info('%s start:%f', self.kind, start)
+
+        wait = start + self.current_frame_count * ptime - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        return self._timestamp, time_base
 
     async def recv(self) -> Union[Frame, Packet]:
         # frame = self.frames[self.counter % 30]            
@@ -177,6 +163,8 @@ class HumanPlayer:
 
         # examine streams
         self.__started: Set[PlayerStreamTrack] = set()
+        # Shared future playout origin, set when both WebRTC tracks are ready.
+        self.__playout_start: Optional[float] = None
         self.__audio: Optional[PlayerStreamTrack] = None
         self.__video: Optional[PlayerStreamTrack] = None
 
@@ -220,20 +208,29 @@ class HumanPlayer:
         """
         return self.__video
 
+    async def wait_for_playout_start(self) -> float:
+        while self.__playout_start is None:
+            await asyncio.sleep(0.001)
+        return self.__playout_start
+
     def _start(self, track: PlayerStreamTrack) -> None:
         self.__started.add(track)
-        if self.__thread is None:
-            self.__log_debug("Starting worker thread")
-            self.__thread_quit = threading.Event()
-            self.__thread = threading.Thread(
-                name="media-player",
-                target=player_worker_thread,
-                args=(
-                    self.__thread_quit,
-                    self.__container
-                ),
-            )
-            self.__thread.start()
+        # The first recv order is not deterministic. Wait for both tracks, then
+        # start the producer and schedule both RTP clocks from one origin.
+        if len(self.__started) < 2 or self.__thread is not None:
+            return
+        self.__playout_start = time.time() + 0.2
+        self.__log_debug("Starting synchronized media worker")
+        self.__thread_quit = threading.Event()
+        self.__thread = threading.Thread(
+            name="media-player",
+            target=player_worker_thread,
+            args=(
+                self.__thread_quit,
+                self.__container
+            ),
+        )
+        self.__thread.start()
 
     def _stop(self, track: PlayerStreamTrack) -> None:
         self.__started.discard(track)
