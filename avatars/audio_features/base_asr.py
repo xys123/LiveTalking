@@ -47,8 +47,26 @@ class BaseASR:
 
         #self.warm_up()
 
+    @staticmethod
+    def _clear_queue(q: Queue) -> None:
+        # Queue.queue.clear() without the mutex races the ASR/render threads.
+        with q.mutex:
+            q.queue.clear()
+            q.unfinished_tasks = 0
+            q.all_tasks_done.notify_all()
+            q.not_full.notify_all()
+
     def flush_talk(self):
-        self.queue.queue.clear()
+        """Discard every pending stage and re-seed the Wav2Lip look-back buffer."""
+        self._clear_queue(self.queue)
+        self._clear_queue(self.output_queue)
+        self._clear_queue(self.feat_queue)
+        silence = np.zeros(self.chunk, dtype=np.float32)
+        self.frames = [silence.copy() for _ in range(self.stride_left_size + self.stride_right_size)]
+        # Match warm_up(): keep the right-context amount in output_queue so the
+        # first generated video frame is paired with the correct audio frame.
+        for _ in range(self.stride_left_size):
+            self.output_queue.put(AudioFrameData(data=silence.copy(), type=1, userdata={}))
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))

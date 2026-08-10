@@ -132,7 +132,12 @@ class BaseAvatar:
         if hasattr(self, 'asr'):
             self.asr.put_audio_frame(audio_chunk, datainfo)
 
-    def put_audio_file(self, filebyte, datainfo:dict={}): 
+    def put_audio_file(self, filebyte, datainfo:dict={}, replace: bool = True):
+        # A browser upload represents one utterance. Remove the old pre-roll so
+        # this clip starts with a matched audio/video pair rather than whatever
+        # silence or prior utterance remains in the asynchronous pipeline.
+        if replace:
+            self.flush_talk()
         input_stream = BytesIO(filebyte)
         stream = self.__create_bytes_stream(input_stream)
         streamlen = stream.shape[0]
@@ -182,12 +187,24 @@ class BaseAvatar:
 
         return stream
 
+    @staticmethod
+    def _clear_queue(q: Queue) -> None:
+        with q.mutex:
+            q.queue.clear()
+            q.unfinished_tasks = 0
+            q.all_tasks_done.notify_all()
+            q.not_full.notify_all()
+
     def flush_talk(self):
         if hasattr(self, 'tts') and hasattr(self.tts, 'flush_talk'):
             self.tts.flush_talk()
         if hasattr(self, 'asr') and hasattr(self.asr, 'flush_talk'):
             self.asr.flush_talk()
-        self.custom_audiotype = 0  
+        self._clear_queue(self.res_frame_queue)
+        if hasattr(self, 'output') and hasattr(self.output, 'flush'):
+            self.output.flush()
+        self.speaking = False
+        self.custom_audiotype = 0
 
     # def flush(self):
     #     self.flush_talk()

@@ -34,6 +34,10 @@ class WebRTCOutput(BaseOutput):
 
 
 
+    def flush(self) -> None:
+        if self._player and hasattr(self._player, 'flush'):
+            self._player.flush()
+
     def get_buffer_size(self) -> int:
         if self._player and hasattr(self._player, 'get_buffer_size'):
             return self._player.get_buffer_size()

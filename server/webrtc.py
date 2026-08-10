@@ -187,6 +187,19 @@ class HumanPlayer:
         new_frame.sample_rate = 16000
         self.__audio._queue.put((new_frame, eventpoint))
 
+    @staticmethod
+    def _clear_track_queue(track: PlayerStreamTrack) -> None:
+        with track._queue.mutex:
+            track._queue.queue.clear()
+            track._queue.unfinished_tasks = 0
+            track._queue.all_tasks_done.notify_all()
+            track._queue.not_full.notify_all()
+
+    def flush(self) -> None:
+        """Drop pre-roll from both tracks as one operation."""
+        self._clear_track_queue(self.__audio)
+        self._clear_track_queue(self.__video)
+
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()
 
