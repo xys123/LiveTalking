@@ -62,7 +62,15 @@ class MelASR(BaseASR):
                 else:
                     mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
                 i += 1
-            self.feat_queue.put(mel_chunks)
+            # Tag the feature/audio pair. A concurrent flush increments the
+            # epoch, allowing inference to reject this batch even if it enters
+            # feat_queue after that queue was cleared.
+            feature_item = (self.pipeline_epoch, mel_chunks)
 
             # discard the old part to save memory
             self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]
+
+        # feat_queue is bounded. Never wait for a free slot while holding
+        # pipeline_lock, otherwise inference cannot acquire the lock to drain
+        # the paired audio and both threads deadlock.
+        self.feat_queue.put(feature_item)

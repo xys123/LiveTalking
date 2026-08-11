@@ -354,11 +354,18 @@ class BaseAvatar:
         logger.info('start inference')
         while not quit_event.is_set():
             starttime = time.perf_counter()
-            audiofeat_batch = []
             try:
-                audiofeat_batch = self.asr.feat_queue.get(block=True, timeout=1)
+                feature_item = self.asr.feat_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
+
+            if (isinstance(feature_item, tuple) and len(feature_item) == 2
+                    and isinstance(feature_item[0], int)):
+                batch_epoch, audiofeat_batch = feature_item
+            else:
+                # Compatibility with feature extractors which still emit a
+                # plain feature list.
+                batch_epoch, audiofeat_batch = None, feature_item
 
             actual_batch_size = len(audiofeat_batch)
             if actual_batch_size == 0:
@@ -369,6 +376,12 @@ class BaseAvatar:
             # read above and its paired audio read. Inspect and consume the
             # pair while holding the same pipeline lock used by run_step/flush.
             with self.asr.pipeline_lock:
+                if batch_epoch is not None and batch_epoch != self.asr.pipeline_epoch:
+                    logger.debug(
+                        'discard stale feature batch epoch=%d current=%d',
+                        batch_epoch, self.asr.pipeline_epoch,
+                    )
+                    continue
                 required_audio_frames = actual_batch_size * 2
                 if self.asr.output_queue.qsize() < required_audio_frames:
                     logger.debug(
@@ -518,8 +531,7 @@ class BaseAvatar:
         _totalframe=0
         while not quit_event.is_set(): 
             t = time.perf_counter()
-            with self.asr.pipeline_lock:
-                self.asr.run_step()
+            self.asr.run_step()
 
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
             if buffer_size >= 5:

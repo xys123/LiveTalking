@@ -49,6 +49,7 @@ class BaseASR:
         # producing the next feature batch. Keep the frame history and its
         # paired output/feature queues as one atomic pipeline state.
         self.pipeline_lock = threading.RLock()
+        self.pipeline_epoch = 0
 
         #self.warm_up()
 
@@ -64,6 +65,7 @@ class BaseASR:
     def flush_talk(self):
         """Discard every pending stage and re-seed the Wav2Lip look-back buffer."""
         with self.pipeline_lock:
+            self.pipeline_epoch += 1
             self._clear_queue(self.queue)
             self._clear_queue(self.output_queue)
             self._clear_queue(self.feat_queue)
