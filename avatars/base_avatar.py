@@ -359,20 +359,34 @@ class BaseAvatar:
                 audiofeat_batch = self.asr.feat_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
-                
+
+            actual_batch_size = len(audiofeat_batch)
+            if actual_batch_size == 0:
+                continue
             is_all_silence = True
             audio_frames: list[AudioFrameData] = []
-            for _ in range(self.batch_size * 2):
-                audioframe:AudioFrameData = self.asr.output_queue.get()
-                if audioframe.type == 0:
-                    is_all_silence = False               
-                audio_frames.append(audioframe)
+            # ``flush_talk`` may invalidate a feature batch between the queue
+            # read above and its paired audio read. Inspect and consume the
+            # pair while holding the same pipeline lock used by run_step/flush.
+            with self.asr.pipeline_lock:
+                required_audio_frames = actual_batch_size * 2
+                if self.asr.output_queue.qsize() < required_audio_frames:
+                    logger.debug(
+                        'discard stale feature batch size=%d after pipeline flush',
+                        actual_batch_size,
+                    )
+                    continue
+                for _ in range(required_audio_frames):
+                    audioframe:AudioFrameData = self.asr.output_queue.get_nowait()
+                    if audioframe.type == 0:
+                        is_all_silence = False
+                    audio_frames.append(audioframe)
 
              # 检测状态变化
             current_speaking = not is_all_silence
 
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
-                for i in range(self.batch_size):
+                for i in range(actual_batch_size):
                     idx = mirror_index(length, index)
                     self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
                     index = index + 1
@@ -384,7 +398,7 @@ class BaseAvatar:
                 pred = self.inference_batch(index, audiofeat_batch)
 
                 counttime += (time.perf_counter() - t)
-                count += self.batch_size
+                count += actual_batch_size
                 if count >= 100:
                     logger.info(f"------actual avg infer fps:{count/counttime:.4f}")
                     count = 0
@@ -504,7 +518,8 @@ class BaseAvatar:
         _totalframe=0
         while not quit_event.is_set(): 
             t = time.perf_counter()
-            self.asr.run_step()
+            with self.asr.pipeline_lock:
+                self.asr.run_step()
 
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
             if buffer_size >= 5:
@@ -517,4 +532,3 @@ class BaseAvatar:
 
         process_quit_event.set()
         process_thread.join()
-

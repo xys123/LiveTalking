@@ -118,7 +118,10 @@ class LipReal(BaseAvatar):
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
         length = len(self.face_list_cycle)
         img_batch = []
-        for i in range(self.batch_size):
+        # A flush can leave a final short feature batch. Match the image batch
+        # to the feature batch so Wav2Lip never concatenates different B dims.
+        actual_batch_size = len(audiofeat_batch)
+        for i in range(actual_batch_size):
             idx = mirror_index(length, index + i)
             face = self.face_list_cycle[idx]
             img_batch.append(face)
@@ -145,4 +148,3 @@ class LipReal(BaseAvatar):
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         combine_frame[y1:y2, x1:x2] = res_frame
         return combine_frame
-

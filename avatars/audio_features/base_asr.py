@@ -16,6 +16,7 @@
 ###############################################################################
 
 import time
+import threading
 import numpy as np
 
 import queue
@@ -44,6 +45,10 @@ class BaseASR:
         self.stride_right_size = opt.r
         #self.context_size = 10
         self.feat_queue = Queue(maxsize=2)
+        # ``flush_talk`` is called by the HTTP thread while ``run_step`` is
+        # producing the next feature batch. Keep the frame history and its
+        # paired output/feature queues as one atomic pipeline state.
+        self.pipeline_lock = threading.RLock()
 
         #self.warm_up()
 
@@ -58,15 +63,16 @@ class BaseASR:
 
     def flush_talk(self):
         """Discard every pending stage and re-seed the Wav2Lip look-back buffer."""
-        self._clear_queue(self.queue)
-        self._clear_queue(self.output_queue)
-        self._clear_queue(self.feat_queue)
-        silence = np.zeros(self.chunk, dtype=np.float32)
-        self.frames = [silence.copy() for _ in range(self.stride_left_size + self.stride_right_size)]
-        # Match warm_up(): keep the right-context amount in output_queue so the
-        # first generated video frame is paired with the correct audio frame.
-        for _ in range(self.stride_left_size):
-            self.output_queue.put(AudioFrameData(data=silence.copy(), type=1, userdata={}))
+        with self.pipeline_lock:
+            self._clear_queue(self.queue)
+            self._clear_queue(self.output_queue)
+            self._clear_queue(self.feat_queue)
+            silence = np.zeros(self.chunk, dtype=np.float32)
+            self.frames = [silence.copy() for _ in range(self.stride_left_size + self.stride_right_size)]
+            # Match warm_up(): keep the right-context amount in output_queue so the
+            # first generated video frame is paired with the correct audio frame.
+            for _ in range(self.stride_left_size):
+                self.output_queue.put(AudioFrameData(data=silence.copy(), type=1, userdata={}))
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
